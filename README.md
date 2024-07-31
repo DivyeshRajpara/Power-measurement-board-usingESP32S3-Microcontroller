@@ -18,3 +18,4 @@ KiCad Design: Open-source PCB design with comprehensive schematics and layout fi
 ![With Dimension](https://github.com/user-attachments/assets/a00d22af-5863-4ca7-aa09-a33572127f39)
 ![With Ground](https://github.com/user-attachments/assets/5aaae36a-c2fc-4eec-b622-7f516210b7a8)
 ![Without Ground](https://github.com/user-attachments/assets/42a38fbf-e772-4a7a-9e3f-8be0327e688e)
+![Schematic INA239](https://github.com/user-attachments/assets/1efb8da7-d355-49bb-bdc4-f2796b2ace2d)
