@@ -1,0 +1,188 @@
+#include <Arduino.h> 
+#include <SPI.h>
+#include <pins_arduino.h> 
+#include <driver/spi_master.h> 
+#include <driver/spi_common.h> 
+#include <esp32-hal-spi.h>
+#include <BLEDevice.h> 
+#include <BLEServer.h> 
+#include <BLEUtils.h> 
+#include <BLE2902.h> 
+#include <Wire.h>
+#define SERVICE_UUID "00000000-0000-0000-0000-000000000000"
+#define CHARACTERISTIC_UUID_TX "00000000-0000-0000-0000-000000000001"
+#define CHARACTERISTIC_UUID_RX "00000000-0000-0000-0000-000000000002"
+#define DEBUG 1 // BLE
+#define ADT_DEBUG 0 // Restart ESP32-S3 caused by ADT
+// INA239
+// Datamode von INA
+#define DATAMODE_INA 1 // CPOL=0; CPHA=1 -> MODE
+// config_Reg_INA
+#define RST_CONFIG_REG 0x000000 // system restart
+#define RD_CONFIG_REG 0x010000 // read CONFIG_REG (address=oh)
+#define WR_CONFIG_REG 0x000040 // read CONFIG-REG: RST(15)=0, CONVDL(13-6)=1=(2ms), 
+ADCRANGE(4)=163.84mV
+// ADC_Config_Reg_INA
+#define WR_ADC_CONFIG_TRIG_REG 0x047B6C
+//#define WR_ADC_CONFIG_CONT_REG 0x04FB6C // MODE = 0xF Continuous VCT, CNVT=1052us. 
+AVG=128
+//#define WR_ADC_CONFIG_CONT_REG_50us_AVG1 0x04F000// MODE = 0xF Continuous VCT, CNVT=50us 
+AVG=1
+//#define WR_ADC_CONFIG_CONT_REG_50us_AVG64 0x04F003 
+#define WR_ADC_CONFIG_CONT_REG_540us_AVG64 0x04F923 
+#define WR_ADC_CONFIG_TRIG_REG_540us_AVG64 0x047923 
+#define WR_ADC_CONFIG_TRIG_REG_540us_AVG1 0x047000 
+#define RD_ADC_CONFIG_REG 0x050000
+// Shunt_Cal_Reg_INA
+#define WR_SHUNT_CAL_REG 0x080EA6 
+#define RD_SHUNT_CAL_REG 0x090000
+// VShunt_Reg_INA
+#define RD_VSHUNT_REG 0x110000
+// VBus_Reg_INA
+#define RD_VBUS_REG 0x150000 // voltage+VBUS_REG(decimal)*3125uV/LSB
+// MEasure_Reg_INA
+BLEServer *pServer = NULL; 
+BLECharacteristic *pTxCharacteristic; 
+bool deviceConnected = false;
+bool oldDeviceConnected = false;
+const int INA_ADC_BUSY_pin = 2; // Replace 2 with the actual pin number
+void getValues(void);
+void spiCommand24(SPIClass *spi, uint32_t data, uint8_t spi_datamode) { 
+SPI.beginTransaction(SPISettings(1000000, MSBFIRST, DATAMODE_INA)); 
+digitalWrite(SPI.pinSS(), LOW);
+SPI.transferBits(data, NULL, 24); 
+digitalWrite(SPI.pinSS(), HIGH); 
+SPI.endTransaction();
+}
+void spiCommand32(SPIClass *spi, uint32_t data, uint8_t spi_datamode) { 
+SPI.beginTransaction(SPISettings(1000000, MSBFIRST, DATAMODE_INA)); 
+digitalWrite(SPI.pinSS(), LOW);
+SPI.transfer32(data); 
+digitalWrite(SPI.pinSS(), HIGH); 
+SPI.endTransaction();
+}
+uint8_t ctrl_FLAG_REG = 0; // Replace uint8_t with the appropriate data type
+void IRAM_ATTR onINA_ready() { 
+detachInterrupt(INA_ADC_BUSY_pin); 
+ctrl_FLAG_REG |= 0x01;
+}
+class MyServerCallbacks : public BLEServerCallbacks { 
+void onConnect(BLEServer* pServer) {
+deviceConnected = true;
+}
+void onDisconnect(BLEServer* pServer) { 
+deviceConnected = false;
+}
+};
+class MyCallbacks : public BLECharacteristicCallbacks { 
+void onWrite(BLECharacteristic *pCharacteristic) {
+std::string rxValue = pCharacteristic->getValue(); 
+if (rxValue.length() > 0) {
+Serial.println("*********"); 
+Serial.println("Received Value: ");
+for (int i = 0; i < rxValue.length(); i++){
+Serial.print(rxValue[i]);
+}
+Serial.println(); 
+Serial.println("*********");
+}
+}
+};
+void setup() {
+// put your setup code here, to run once: 
+BLEDevice::init("Project-Seminar-SS2023"); 
+pServer = BLEDevice::createServer();
+pServer->setCallbacks(new MyServerCallbacks());
+BLEService *pService = pServer->createService(BLEUUID(SERVICE_UUID));
+pTxCharacteristic = pService->createCharacteristic( 
+BLEUUID(CHARACTERISTIC_UUID_TX),
+BLECharacteristic::PROPERTY_NOTIFY
+);
+pTxCharacteristic->addDescriptor(new BLE2902());
+BLECharacteristic *pRxCharacteristic = pService->createCharacteristic( 
+BLEUUID(CHARACTERISTIC_UUID_RX),
+BLECharacteristic::PROPERTY_WRITE
+);
+pRxCharacteristic->setCallbacks(new MyCallbacks());
+pService->start();
+pServer->getAdvertising()->start();
+Serial.println("Waiting for a client connection to notify.");
+}
+// Define and initialize the SPI object 
+SPIClass mySPI2(HSPI);
+void loop() {
+// put your main code here, to run repeatedly:
+if ((ctrl_FLAG_REG & 0x10) == 0x10) {
+spiCommand24(&mySPI2, WR_ADC_CONFIG_TRIG_REG_540us_AVG64, DATAMODE_INA); 
+ctrl_FLAG_REG = (ctrl_FLAG_REG & (~0x10));
+delay(10);
+}
+const uint8_t RD_DIETEMP_REG = 0x10; // Replace 0x10 with the correct value 
+uint16_t receivedVal = 0; // Replace uint16_t with the appropriate data type 
+const uint8_t RD_POWER_REG = 0x20; // Replace 0x20 with the correct value
+uint16_t tmpDIETEMP_INA_raw = 0;
+float rawDataBuff[5] = { 0.0, 0.0, 0.0, 0.0, 0.0 }; 
+if ((ctrl_FLAG_REG & 0x01) == 0x01) {
+spiCommand24(&mySPI2, RD_DIETEMP_REG, DATAMODE_INA); 
+tmpDIETEMP_INA_raw = (receivedVal >> 15); 
+rawDataBuff[0] = (tmpDIETEMP_INA_raw * 25); 
+spiCommand24(&mySPI2, RD_VBUS_REG, 1);
+uint16_t tmpVBUS_INA_raw = receivedVal; 
+rawDataBuff[1] = tmpVBUS_INA_raw * 30; 
+spiCommand24(&mySPI2, RD_CONFIG_REG, DATAMODE_INA); 
+uint16_t tmpCURR_INA_raw = receivedVal; 
+rawDataBuff[2] = tmpCURR_INA_raw * 5; 
+spiCommand24(&mySPI2, RD_POWER_REG, DATAMODE_INA); 
+uint16_t tmpPWR_INA_raw = receivedVal; 
+rawDataBuff[3] = tmpPWR_INA_raw * 23;
+}
+if (deviceConnected) { 
+Serial.println("\nDevice connected..\n"); 
+delay(10);
+struct {
+char Data_Block_Caption[100]; 
+char PV_Module_Voltage[50]; 
+char PV_Module_Current[50]; 
+char PV_Module_Power[50];
+char Meas_Box_Temperature[50]; 
+char PV_Error_Message[50];
+} measurement_data;
+char dtostrf_buff[20];
+memcpy(measurement_data.Data_Block_Caption, "\n\n PV_Module Measurements: \n\n", 
+strlen("\n\n PV-Module Measurements: \n\n") + 1);
+memcpy(measurement_data.Meas_Box_Temperature, "\n Measured box-temperature:", 
+strlen("\n Measured box-temperature:") + 1);
+dtostrf(rawDataBuff[0], 7, 1, dtostrf_buff); 
+strcat(measurement_data.Meas_Box_Temperature, dtostrf_buff); 
+strcat(measurement_data.Meas_Box_Temperature, "°C"); 
+memset(dtostrf_buff, 0, sizeof(dtostrf_buff));
+memcpy(measurement_data.PV_Module_Voltage, "\nPV-Module output voltage:", strlen("\nPVModule output voltage:") + 1);
+dtostrf(rawDataBuff[1], 7, 2, dtostrf_buff); 
+strcat(measurement_data.PV_Module_Voltage, dtostrf_buff); 
+strcat(measurement_data.PV_Module_Voltage, "V"); 
+memset(dtostrf_buff, 0, sizeof(dtostrf_buff));
+Serial.println("\n Device connected..\n"); 
+delay(10);
+pTxCharacteristic->setValue(measurement_data.Data_Block_Caption); 
+pTxCharacteristic->notify();
+pTxCharacteristic->setValue(measurement_data.Meas_Box_Temperature); 
+pTxCharacteristic->notify();
+}
+if (!deviceConnected && oldDeviceConnected) { 
+delay(500);
+pServer->startAdvertising(); 
+Serial.println("\nStart advertising"); 
+oldDeviceConnected = deviceConnected;
+}
+if (deviceConnected && !oldDeviceConnected) { 
+oldDeviceConnected = deviceConnected;
+}
+}
+void writeLEDpin() {
+// Implement the function logic here 
+if ((ctrl_FLAG_REG & 0x01) == 0x01) {
+ctrl_FLAG_REG = (ctrl_FLAG_REG & (~0x01)); 
+ctrl_FLAG_REG |= 0x10; 
+attachInterrupt(INA_ADC_BUSY_pin, writeLEDpin, RISING);
+}
+}
